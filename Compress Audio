@@ -1,0 +1,298 @@
+#!/bin/bash
+#
+# compress-audio
+#
+# Copyright (c) 2015 Luc Deschenaux
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+killtree() {
+    # disable ctrl-c
+    trap '' SIGINT
+
+    local _pid=$2
+    local _sig=$1
+    local killroot=$3
+
+    for _child in $(ps -o pid --no-headers --ppid ${_pid} 2>/dev/null); do
+        killtree ${_sig} ${_child} yes
+    done
+    [ -n "$killroot" ] && kill ${_sig} ${_pid} >/dev/null 2>&1
+}
+
+main() {
+  set -x
+  unset i filelist
+
+  for dependency in ffmpeg zenity eyeD3 convert AtomicParsley ; do
+    if [ -z "$(which $dependency)" ] ; then
+      package=$dependency
+      [ "$dependency" == "convert" ] && package=imagemagick
+      zenity --error --text="The following package is required and must be installed first:\n\n<b>$package</b>" --title="Command not found"
+      exit 1
+    fi
+  done
+
+  touch /tmp/$$.tmp
+  export myPID=$BASHPID
+
+  trap "killtree -9 $myPID yes" SIGINT SIGKILL SIGTERM SIGHUP SIGQUIT EXIT
+
+
+  FIFO=$(mktemp -u).$$
+  mkfifo $FIFO
+  tail -f /tmp/$$.tmp > $FIFO &
+  tail_pid=$!
+
+  (cat $FIFO | zenity --progress --pulsate --auto-kill --title "Building file list..." --auto-close) &
+  export zenity_pid=$!
+
+  while IFS= read -r -u3 f; do
+    kill -0 $zenity_pid || killtree -9 $$ yes
+    filename=${f%.*}
+    mimetype -b "$f" | grep -q -i -e ^audio -e ^video || continue
+    filelist+=("$f")
+    display_name="... ${f: -80}"
+    [ "$display_name" == "... " ] && display_name=$f
+    echo "# [ ${#filelist[@]} ] "$display_name
+  done 3< <(find "$@" -xtype f -print) >> /tmp/$$.tmp
+
+  kill -9 $zenity_pid
+  kill -9 $tail_pid
+  rm $FIFO
+
+  export duration_tmp=/tmp/$myPID.duration.tmp
+  touch /tmp/$myPID.tmp
+  touch /tmp/$myPID.err.tmp
+
+  compress_audio "${filelist[@]}"
+}
+
+escape() {
+  sed -r -e 's/</&lt;/' -e 's/>/&gt;/' -e 's/&/&amp;/'
+}
+
+getoutofhere() {
+  rm /tmp/$myPID.tmp
+  rm /tmp/$myPID.* 2> /dev/null
+  rm $duration_tmp
+  rm $FIFO
+  killtree -9 $convert_pid
+  kill -9 $zenity_pid
+  kill -9 $tail_pid
+  killtree -9 $myPID yes
+  exit $1
+}
+
+getquality() {
+  BR_TYPE=$(zenity --list --column "Pick"  --column "Method" TRUE VBR FALSE CBR --radiolist)
+  [ -z "$BR_TYPE" ] && exit 0
+  if [ "$BR_TYPE" = "VBR" ] ; then
+    case $CODEC in
+      mp3)
+        VBR_PRESET=$(zenity --list --column="Pick" --column id --column "Target bitrate" --column Min --column Max FALSE 0 245\ kbit/s 220 260 FALSE 1 225\ kbit/s 190 250 TRUE 2 190\ kbit/s 170 210 FALSE 3 175\ kbit/s 150 195 FALSE 4 165\ kbit/s 140 185 FALSE 5 130\ kbit/s 120 150 FALSE 6 115\ kbit/s 100 130 FALSE 7 100\ kbit/s 80 120 FALSE 8 85\ kbit/s 70 105 FALSE 9 65\ kbit/s 45 85 --radiolist --title="VBR Setting" --hide-column=2 --height=344 --width=344)
+        ;;
+      aac)
+        VBR_PRESET=$(zenity --list --column="Pick" --column id --column "Target bitrate" FALSE 5 192-224\ kbit/s TRUE 4 128-144\ kbit/s FALSE 3 96-112\ kbit/s FALSE 2 64-80\ kbit/s FALSE 1 40-64\ kbit/s --radiolist --title="VBR Setting" --hide-column=2 --height=344 --width=288)
+      ;;
+    esac
+    [ -z "$VBR_PRESET" ] && exit 0
+  else
+    BITRATE=$(zenity --list --column="Pick" --column id --column "Target bitrate" FALSE 384 384\ kbit/s FALSE 320 320\ kbit/s FALSE 256 256\ kbit/s FALSE 192 192\ kbit/s FALSE 160 160\ kbit/s TRUE 128 128\ kbit/s --radiolist --title="VBR Setting" --hide-column=2 --height=344 --width=288)
+    [ -z "$BITRATE" ] && exit
+  fi
+}
+
+getcodec() {
+  export CODEC=$(zenity --list --column "Pick"  --column "Codec" TRUE aac FALSE mp3 --radiolist)
+  [ -z "$CODEC" ] && exit 0
+  case $CODEC in
+    aac) EXT=m4a ;;
+    mp3) EXT=mp3 ;;
+  esac
+}
+
+progress2() {
+  BUF= ; LEN=80 ;
+  tail -f -c 1 /tmp/$myPID.err.tmp | while read -n 1 c ; do
+     BUF=$BUF$c ;
+     [ ${#BUF} -eq $LEN ] && BUF=${BUF:1} ;
+     [[ "$BUF" =~  time= ]] || continue
+     time=$(echo "$BUF" | sed -r -n -e 's/.*time= *([0-9\.\:]+)[^0-9\.\:].*/\1/p') ;
+     [ -z "$time" ] && continue
+     BUF=
+     [[ "$time" =~ ":" ]] && time=$(hms2s $time)
+     duration=$(cat "$duration_tmp")
+     [ -n "$duration" ] && echo $(( time * 100 / duration )) >> /tmp/$myPID.tmp
+  done
+}
+
+getduration(){
+  dur=`ffmpeg -y -i "$1" -y /dev/null 2>&1 | sed -r -n -e 's/:0([0-9])/:\1/g' -e 's/.*Duration: ([0-9:.]+).*/\1/p'`
+  echo $(hms2s $dur)
+}
+
+hms2s() {
+  h=$(echo $1 | cut -f 1 -d ':')
+  m=$(echo $1 | cut -f 2 -d ':')
+  s=$(echo $1 | cut -f 3 -d ':')
+  expr $h \* 3600 + $m \* 60 + $(echo $s | cut -f 1 -d '.')
+
+}
+
+watchdog() {
+ while true; do
+    sleep 1
+    kill -0 $zenity_pid || getoutofhere 1 ; [ ! -f /tmp/$myPID.tmp ] && exit 1
+ done
+}
+
+zenity_progress() {
+
+  FIFO=$(mktemp -u).$$
+  mkfifo $FIFO
+
+  tail -f /tmp/$myPID.tmp > $FIFO &
+  export tail_pid=$!
+
+  percent=0
+  (cat $FIFO | zenity --progress --auto-kill --title "Convert to $CODEC" --text="$source" --percentage=$percent ) &
+  export zenity_pid=$!
+
+}
+
+convert_files() {
+  sleep 1
+  while [ $# -gt 0 ] ; do
+        num=$(expr $num + 1)
+        filename=$(echo "$1" | sed -r -n -e 's/^(.*)\.[^\.]+$/\1/p')
+        source="$1"
+        getduration "$source" > $duration_tmp
+        shift
+        base=$(basename "$filename")
+        display_name="... ${source: -80}"
+        [ "$display_name" == "... " ] && display_name=$source
+        echo "# [ $num / $total ]  $display_name"
+        echo $(expr $num \* 100 / $total)
+        [ -f "$filename".$EXT ] && continue
+        [ ! -f /tmp/$myPID.tmp ] && exit 1
+        case $CODEC in
+          aac)
+            case $BR_TYPE in
+              VBR)
+                ffmpeg -y -i "$source" -vn -c:a libfdk_aac -vbr $VBR_PRESET "/tmp/$base.$EXT" 2>> /tmp/$myPID.err.tmp
+                cmd=$(echo ffmpeg -y -i \"$source\" -vn -c:a libfdk_aac -vbr $VBR_PRESET \"/tmp/$base.$EXT\" | escape)
+                ret=$?
+              ;;
+              CBR)
+                ffmpeg -y -i "$source" -vn -c:a libfdk_aac -b:a ${BITRATE}k "/tmp/$base.$EXT" 2>> /tmp/$myPID.err.tmp
+                cmd=$(echo ffmpeg -y -i \"$source\" -vn -c:a libfdk_aac -b:a ${BITRATE}k \"/tmp/$base.$EXT\" | escape)
+                ret=$?
+              ;;
+            esac
+            echo 100
+            if [ $ret -eq 0 ] ; then
+              if ffmpeg -y -i "$source" /tmp/$$.artwork.tmp.jpg ; then
+                convert /tmp/$$.artwork.tmp.jpg /tmp/$$.artwork.jpg
+                AtomicParsley "/tmp/$base.$EXT" --artwork /tmp/$$.artwork.jpg --overWrite
+              else
+                sourcedir=$(dirname "$source")
+                 IMG=$(find "$sourcedir" -name \*cover\* -or -name \*artwork\* -or -name \*folder\* -type f | grep  -e '\.jpg$\|\.png$' | head -n 1)
+#                IMG=$(ls "$sourcedir"/*@\(cover|artwork|folder|*\)*.@\(jpg|png\) | head -n 1)
+                if [ -n "$IMG" ] ; then
+                  AtomicParsley "/tmp/$base.$EXT" --artwork "$IMG" --overWrite
+                fi
+              fi
+            fi
+          ;;
+          mp3)
+            case $BR_TYPE in
+              VBR)
+                ffmpeg -y -i "$source" -vn -q:a $VBR_PRESET -ac 2 -ar 48000 "/tmp/$base.$EXT" 2>> /tmp/$myPID.err.tmp
+                cmd=$(echo ffmpeg -y -i \"$source\" -vn -q:a $VBR_PRESET -ac 2 -ar 48000 \"/tmp/$base.mp3\" | escape)
+                ret=$?
+                ;;
+              CBR)
+                ffmpeg -y -i "$source" -vn -b:a ${BITRATE}k -ac 2 -ar 48000 "/tmp/$base.$EXT" 2>> /tmp/$myPID.err.tmp
+                cmd=$(echo ffmpeg -y -i \"$source\" -vn -b:a ${BITRATE}k -ac 2 -ar 48000 \"/tmp/$base.mp3\" | escape)
+                ret=$?
+                ;;
+            esac
+            echo 100
+            if [ $ret -eq 0 ] ; then
+              if ffmpeg -y -i "$source" /tmp/$$.artwork.tmp.jpg 2>/dev/null ; then
+                convert /tmp/$$.artwork.tmp.jpg /tmp/$$.artwork.jpg
+                eyeD3 --add-image /tmp/$$.artwork.jpg:FRONT_COVER "/tmp/$base.$EXT"
+              else
+                sourcedir=$(dirname "$source")
+                IMG=$(find "$sourcedir" -name \*cover\* -or -name \*artwork\* -or -name \*folder\* -type f | grep  -e '\.jpg$\|\.png$' | head -n 1)
+                #IMG=$(ls "$sourcedir"/*@\(cover|artwork|folder|*\)*.@\(jpg|png\) | head -n 1)
+                if [ -n "$IMG" ] ; then
+                  eyeD3 --add-image "$IMG":FRONT_COVER  "/tmp/$base.$EXT"
+                fi
+              fi
+            fi
+        esac
+        if [ $ret -eq 0 -a -s "/tmp/$base.$EXT" ] ; then
+          mv "/tmp/$base.$EXT" "$filename.$EXT" && [ "$KEEP" != "1" ] && rm "$source"
+        else
+          [ ! -f /tmp/$myPID.tmp ] && exit 1
+          zenity --error --text="$(echo $source | escape):\n\nAn error occured during conversion:\n\n$cmd\n\n<b>$(tail -n 1 /tmp/$$.err.tmp | escape)</b>" --title="Error"
+        fi
+  done
+
+  echo 100
+  sleep 1
+  rm $FIFO
+  killtree -9 $zenity_pid yes
+}
+
+compress_audio() {
+
+  total=$(expr $# + 1)
+  num=0
+  [ $# -gt 0 ] || exit 0
+
+  getcodec
+  while [ $# -gt 0 ] ; do
+    num=$(expr $num + 1)
+    filename=$(echo "$1" | sed -r -n -e 's/^(.*)\.[^\.]+$/\1/p')
+    source="$1"
+    [ -f "$filename".$EXT ] && shift && continue
+    getquality
+  #  getduration "$source" $duration_tmp
+    base=$(basename "$filename")
+    source=$(echo $source | escape)
+    percent=$(expr $num \* 100 / $total)
+    break;
+  done
+
+  if [ -z "$KEEP" ] ; then
+    zenity --question --text "Keep original files ?"
+    KEEP=$?
+  fi
+
+  [ $num -gt 0 ] && num=$(expr $num - 1)
+  zenity_progress
+  convert_files "$@" >> /tmp/$myPID.tmp &
+  export convert_pid=$!
+  watchdog &
+  progress2 $myPID &
+  wait $zenity_pid
+
+  getoutofhere 0
+}
+
+main "$@"
