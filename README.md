@@ -7,7 +7,11 @@ You can also use it to extract the audio track from videos.
 
 Copy the script "Compress Audio" to ~/bin or /usr/local/bin
 
-Associate folders with "Compress Audio" by selecting "Open With... -> Other Application..." in the file manager. if you cannot associate this script with folders when selecting "Open with..." in the file manager, you should consider switching to "Nemo" (a fork of Nautilus). (On the other hand you can use it from the command line).
+Associate folders with "Compress Audio" by selecting "Open With... -> Other Application..." in the file manager.
+
+If you cannot associate this script with folders when selecting "Open with..." in the file manager, you should consider switching to "Nemo" (a fork of Nautilus).
+
+On the other hand you can use it from the command line.
 
 ## License
 AGPL v3.0 or later
