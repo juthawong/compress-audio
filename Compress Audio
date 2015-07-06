@@ -246,7 +246,7 @@ convert_files() {
             fi
         esac
         if [ $ret -eq 0 -a -s "/tmp/$base.$EXT" ] ; then
-          mv "/tmp/$base.$EXT" "$filename.$EXT" && [ "$KEEP" != "1" ] && rm "$source"
+          mv "/tmp/$base.$EXT" "$filename.$EXT" && [ "$KEEP" == "1" ] && rm "$source"
         else
           [ ! -f /tmp/$myPID.tmp ] && exit 1
           zenity --error --text="$(echo $source | escape):\n\nAn error occured during conversion:\n\n$cmd\n\n<b>$(tail -n 1 /tmp/$$.err.tmp | escape)</b>" --title="Error"
